@@ -20,9 +20,12 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Накопленные медиагруппы: media_group_id -> [Message, ...]
 pending_groups: dict[str, list[Message]] = {}
 group_tasks: dict[str, asyncio.Task] = {}
 
+# Данные для публикации: key_id -> {"user_id": int, "message_ids": list[int]}
+# key_id = message_id первого пересланного сообщения в чате с админом
 pending_submissions: dict[int, dict] = {}
 
 
@@ -35,15 +38,25 @@ def make_keyboard(key_id: int) -> InlineKeyboardMarkup:
 
 async def send_to_admin(messages: list[Message]) -> None:
     first = messages[0]
-    user_info = f"От: {first.from_user.full_name} (id {first.from_user.id})"
 
-    forwarded_first = await first.forward(chat_id=ADMIN_ID)
-    for msg in messages[1:]:
-        await msg.forward(chat_id=ADMIN_ID)
+    # copy вместо forward — имя отправителя нигде не показывается
+    if len(messages) == 1:
+        copied = await bot.copy_message(
+            chat_id=ADMIN_ID,
+            from_chat_id=first.from_user.id,
+            message_id=first.message_id,
+        )
+        key_id = copied.message_id
+        label = "Новая заявка"
+    else:
+        results = await bot.copy_messages(
+            chat_id=ADMIN_ID,
+            from_chat_id=first.from_user.id,
+            message_ids=[m.message_id for m in messages],
+        )
+        key_id = results[0].message_id
+        label = f"Новая заявка | альбом {len(messages)} шт."
 
-    key_id = forwarded_first.message_id
-
-    label = user_info if len(messages) == 1 else f"{user_info} | альбом {len(messages)} шт."
     await bot.send_message(ADMIN_ID, label, reply_markup=make_keyboard(key_id))
 
     pending_submissions[key_id] = {
@@ -67,7 +80,7 @@ async def cmd_start(message: Message) -> None:
     else:
         await message.answer(
             "Напиши что-нибудь — это может попасть в канал.\n"
-            "Поддерживается текст, фото, видео, стикеры, гифки, кружки и всt остальное"
+            "Поддерживается текст, фото, видео, стикеры, гифки, кружки и всё остальное."
         )
 
 
@@ -103,6 +116,7 @@ async def cb_publish(callback: CallbackQuery) -> None:
                 message_id=message_ids[0],
             )
         else:
+            # copy_messages — Bot API 6.5+, копирует альбом целиком
             await bot.copy_messages(
                 chat_id=CHANNEL_ID,
                 from_chat_id=user_id,
@@ -125,6 +139,8 @@ async def cb_skip(callback: CallbackQuery) -> None:
     await callback.message.edit_text(callback.message.text + "\n\nПропущено.", reply_markup=None)
     await callback.answer()
 
+
+# Health check — пингуется через cron-job чтобы Render free tier не засыпал
 
 async def health(request: web.Request) -> web.Response:
     return web.Response(text="ok")
